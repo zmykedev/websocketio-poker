@@ -162,13 +162,12 @@ async function start() {
               { $push: { users: user } },
               { returnDocument: 'after' }
             );
-            const roomDoc = updated.value;
 
             userSockets.set(userId, ws);
             currentUserId = userId;
             currentRoomId = roomId;
 
-            const room = toRoomDto(roomDoc);
+            const room = toRoomDto(updated);
             broadcastToUser(userId, { type: 'room:joined', room, userId });
             await broadcast(room, { type: 'room:updated', room }, userId);
             console.log(`👤 ${userName} se unió a la sala ${roomId}`);
