@@ -5,7 +5,7 @@ let db;
 
 export async function connectToDb() {
   if (db) return db;
-  const uri = process.env.DB_URI;
+  const uri = process.env.MONGO_URL;
   if (!uri) {
     throw new Error('DB_URL no está definido en el entorno (.env)');
   }
