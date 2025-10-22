@@ -180,6 +180,7 @@ async function start(): Promise<void> {
               name: ownerName,
               isReady: false,
               vote: null,
+              spectator: false,
             }
 
             const room: Room = {
@@ -229,6 +230,7 @@ async function start(): Promise<void> {
               name: userName,
               isReady: false,
               vote: null,
+              spectator: false,
             }
 
             const updatedRoom = await roomsCol.findOneAndUpdate(
@@ -355,6 +357,45 @@ async function start(): Promise<void> {
             })
 
             console.log(`🗳️  Usuario ${currentUserId} votó ${vote} en sala ${currentRoomId}`);
+            break;
+          }
+
+          case 'user:spectate': {
+            const { spectator } = message;
+            if (!currentRoomId || !currentUserId) {
+              ws.send(JSON.stringify({
+                type: 'room:error',
+                message: 'No estás en una sala'
+              }));
+              break;
+            }
+
+            const updatedRoom = await roomsCol.findOneAndUpdate(
+              {
+                _id: currentRoomId as unknown as ObjectId,
+                'users.id': currentUserId
+              },
+              { $set: { 'users.$.spectator': spectator } },
+              { returnDocument: 'after' }
+            );
+
+            if (!updatedRoom) {
+              ws.send(JSON.stringify({
+                type: 'room:error',
+                message: 'Error al actualizar el estado de espectador'
+              }));
+              break;
+            }
+
+            await broadcast<RoomUpdatedMessage>({
+              room: updatedRoom,
+              message: {
+                type: 'room:updated',
+                room: roomDocumentToRoom(updatedRoom),
+              }
+            })
+
+            console.log(`👀  Usuario ${currentUserId} cambió estado de espectador a ${spectator} en sala ${currentRoomId}`);
             break;
           }
 

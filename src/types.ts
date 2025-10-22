@@ -7,6 +7,7 @@ export type User = {
   name: string;
   isReady: boolean;
   vote: string | null;
+  spectator: boolean;
 }
 
 type RoomBase = {
@@ -57,13 +58,20 @@ export type UserVoteMessage = WebSocketMessage & {
   vote: string;
 }
 
+export type UserSpectateMessage = WebSocketMessage & {
+  type: 'user:spectate';
+  spectator: boolean;
+}
+
 export type IncomingMessage =
   | RoomCreateMessage
   | RoomJoinMessage
   | RoomRevealMessage
   | RoomResetMessage
-  | UserVoteMessage;
+  | UserVoteMessage
+  | UserSpectateMessage;
 
+// Outgoing Messages
 export type RoomCreatedMessage = WebSocketMessage & {
   type: 'room:created';
   room: Room;
