@@ -375,7 +375,11 @@ async function start(): Promise<void> {
                 _id: currentRoomId as unknown as ObjectId,
                 'users.id': currentUserId
               },
-              { $set: { 'users.$.spectator': spectator } },
+              { $set: {
+                'users.$.spectator': spectator,
+                'users.$.isReady': spectator ? false : undefined,
+                'users.$.vote': spectator ? null : undefined,
+              } },
               { returnDocument: 'after' }
             );
 
