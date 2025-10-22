@@ -1,6 +1,6 @@
 # Planning Poker Server
 
-Backend con WebSocket real para la aplicación de Planning Poker, ahora con persistencia en MongoDB.
+Backend con WebSocket real para la aplicación de Planning Poker, ahora con persistencia en MongoDB y **TypeScript**.
 
 ## 🚀 Instalación
 
@@ -25,16 +25,43 @@ pnpm dev
 npm run dev
 ```
 
+### Compilar TypeScript
+```bash
+pnpm build
+# o
+npm run build
+```
+
 ### Modo Producción
 ```bash
+# Primero compilar
+pnpm build
+# Luego ejecutar
 pnpm start
 # o
 npm start
 ```
 
+### Verificar tipos sin compilar
+```bash
+pnpm typecheck
+# o
+npm run typecheck
+```
+
 El servidor estará disponible en:
 - HTTP: http://localhost:3001
 - WebSocket: ws://localhost:3001
+
+## 🔧 Estructura del Proyecto
+
+```
+src/
+  ├── server.ts    # Servidor principal con WebSocket
+  ├── db.ts        # Conexión a MongoDB
+  └── types.ts     # Tipos TypeScript
+dist/              # Archivos compilados (generados por tsc)
+```
 
 ## 🔌 API WebSocket
 
@@ -105,18 +132,23 @@ Lista todas las salas activas (conteo de usuarios, mazo, etc.).
 
 Se crea un índice en `users.id` para acelerar limpiezas al desconectar usuarios.
 
-## 🔧 Variables de Entorno
+## 🔐 Variables de Entorno
 
-Crea un archivo `.env` en la raíz del proyecto con al menos:
+Crea un archivo `.env` en la raíz del proyecto:
 
-```
+```env
+MONGO_URL=mongodb://localhost:27017
+DB_NAME=planning-poker
 PORT=3001
-DB_URL=mongodb://usuario:password@host:27017
-# opcional, por defecto: planning_poker
-DB_NAME=planning_poker
 ```
 
-También puedes usar las variables `MONGODB_URI` o `MONGO_URL` si prefieres esos nombres.
+## 🛠️ Stack Tecnológico
+
+- **Node.js** con **TypeScript**
+- **Express** (API REST)
+- **WebSocket (ws)** (comunicación en tiempo real)
+- **MongoDB** (persistencia)
+- **tsx** (desarrollo con hot-reload)
 
 ## 🏗️ Características
 
