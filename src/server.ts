@@ -1,25 +1,19 @@
 import express from 'express';
+import { createServer } from 'http';
+import { Server, Socket } from 'socket.io';
 import cors from 'cors';
-import { WebSocket, WebSocketServer } from 'ws';
 import { connectToDb, getRoomsCollection } from './db.js';
 import { v4 as uuid } from 'uuid';
 import 'dotenv/config';
 
 import {
-  BroadcastMessage,
-  ExtendedWebSocket,
-  IncomingMessage,
   Room,
-  RoomCreatedMessage,
-  RoomCreateMessage,
   RoomDocument,
-  RoomJoinedMessage,
+  User,
+  RoomCreateMessage,
   RoomJoinMessage,
-  RoomUpdatedMessage,
-  User, UserVoteMessage, WebSocketMessage,
+  UserVoteMessage,
 } from './types.js';
-import {ObjectId} from "mongodb";
-import { Request, Response } from 'express'
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -27,499 +21,391 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
-const userSockets = new Map<string, ExtendedWebSocket>();
+// Crear servidor HTTP y Socket.IO
+const httpServer = createServer(app);
+const io = new Server(httpServer, {
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST'],
+  },
+});
 
 function generateId(): string {
   return uuid();
 }
 
-function isWsOpen(ws: WebSocket | undefined): boolean {
-  return !!ws && ws.readyState === WebSocket.OPEN;
-}
+const DEFAULT_EMOJI = '🙂';
 
-async function broadcast<MessageType extends WebSocketMessage>({
-  room,
-  message,
-  excludeUserId,
-}: BroadcastMessage<MessageType>): Promise<void> {
-  if (!room) return;
-
-  for (const user of room.users || []) {
-    if (excludeUserId && user.id === excludeUserId) continue;
-
-    const ws = userSockets.get(user.id);
-
-    if (isWsOpen(ws)) {
-      try {
-        ws!.send(JSON.stringify(message));
-      } catch (e) {
-        console.error(`❌  Error enviando mensaje al usuario ${user.id}:`, e);
-      }
-    }
-  }
-}
-
-function broadcastToUser<MessageType>(userId: string, message: MessageType): void {
-  const ws = userSockets.get(userId);
-  if (isWsOpen(ws)) {
-    try {
-      ws!.send(JSON.stringify(message));
-    } catch {
-      console.error(`❌  Error enviando mensaje al usuario ${userId}`);
-    }
-  }
-}
-
-async function cleanupUser({ uid }: { uid: string }): Promise<void> {
-  userSockets.delete(uid);
-  const roomsCol = getRoomsCollection();
-
-  const affectedRooms = await roomsCol
-    .find({ 'users.id': uid })
-    .toArray();
-
-  console.log(`🧹  Limpiando usuario ${uid} de ${affectedRooms.length} salas`);
-
-  for (const room of affectedRooms) {
-    const updated = await roomsCol.findOneAndUpdate({
-      _id: room._id,
-    }, {
-      $pull: {
-        users: {
-          id: uid
-        }
-      }
-    }, {
-      returnDocument: 'after',
-    });
-
-    if (!updated) continue;
-
-    let ownerId = updated.ownerId;
-
-    if (!updated.users || updated.users.length === 0) {
-      await roomsCol.deleteOne({_id: updated._id});
-      console.log(`🗑️  Sala ${updated._id} eliminada (vacía)`);
-      continue;
-    }
-
-    if (room.ownerId === uid) {
-      const newOwner = updated.users[0];
-      const ownerUpdated = await roomsCol.updateOne(
-        {_id: updated._id},
-        {$set: {ownerId: newOwner.id}},
-      );
-
-      if (ownerUpdated.modifiedCount === 1) {
-        ownerId = newOwner.id;
-        console.log(`👑  Nuevo propietario en sala ${updated._id}: ${newOwner.name}`);
-      }
-    }
-
-    await broadcast<RoomUpdatedMessage>({
-      room: updated,
-      message: {
-        type: 'room:updated',
-        room: roomDocumentToRoom({
-          ...updated,
-          ownerId,
-        }),
-      }
-    });
-  }
-}
-
-function roomToRoomDocument(room: Room): RoomDocument {
-  const { id, ...rest } = room;
-
+function roomDocumentToRoom(doc: RoomDocument): Room {
   return {
-    _id: id as unknown as ObjectId,
-    ...rest,
+    id: doc._id.toString(),
+    name: doc.name,
+    users: doc.users.map((user) => ({
+      ...user,
+      emoji: user.emoji || DEFAULT_EMOJI,
+    })),
+    revealed: doc.revealed,
+    cards: doc.cards,
+    createdAt: doc.createdAt,
+    ownerId: doc.ownerId,
   };
 }
 
-function roomDocumentToRoom(roomDoc: RoomDocument): Room {
-  const { _id, ...rest } = roomDoc;
-
-  return {
-    id: roomDoc._id.toString(),
-    ...rest,
-  };
-}
-
-async function start(): Promise<void> {
-  await connectToDb();
-  const roomsCol = getRoomsCollection();
-  await roomsCol.deleteMany();
-
-  await roomsCol.createIndex({'users.id': 1});
-
-  const server = app.listen(PORT, () => {
-    console.log(`🚀  Servidor HTTP escuchando en http://localhost:${PORT}`);
-  });
-
-  const wss = new WebSocketServer({server});
-  console.log('🔌  Servidor WebSocket listo');
-
-  wss.on('connection', (ws: ExtendedWebSocket) => {
-    console.log('✅  Nueva conexión WebSocket');
+// Socket.IO Connection
+io.on('connection', (socket: Socket) => {
     let currentUserId: string | null = null;
     let currentRoomId: string | null = null;
 
-    ws.on('message', async (data: Buffer) => {
-      try {
-        const message = JSON.parse(data.toString()) as IncomingMessage;
-        console.log('📨  Mensaje recibido:', message.type);
-
-        switch (message.type) {
-          case 'room:create': {
-            const { roomName, ownerName, cards } = message as RoomCreateMessage;
+  // CREAR SALA
+  socket.on('room:create', async (data: RoomCreateMessage) => {
+    try {
+      const { roomName, ownerName, ownerEmoji, cards } = data;
+      
+      if (!roomName || !ownerName) {
+        socket.emit('room:error', {
+          type: 'room:error',
+          message: 'Nombre de sala y usuario son requeridos',
+        });
+        return;
+      }
+      
+      const roomsCol = getRoomsCollection();
 
             const owner: User = {
               id: generateId(),
               name: ownerName,
+        emoji: ownerEmoji || DEFAULT_EMOJI,
               isReady: false,
               vote: null,
               spectator: false,
-            }
+      };
 
-            const room: Room = {
-              id: generateId(),
+      const roomId = generateId();
+      const room: RoomDocument = {
+        _id: roomId,
               name: roomName,
               ownerId: owner.id,
               users: [owner],
               revealed: false,
-              cards,
+        cards: cards || [],
               createdAt: Date.now(),
-            }
+      };
 
-            await roomsCol.insertOne(roomToRoomDocument(room));
+      await roomsCol.insertOne(room);
 
-            userSockets.set(owner.id, ws);
             currentUserId = owner.id;
-            currentRoomId = room.id;
+      currentRoomId = roomId;
 
-            broadcastToUser<RoomCreatedMessage>(owner.id, {
+      // Unirse al room de Socket.IO
+      socket.join(currentRoomId);
+
+      // Enviar confirmación al creador
+      socket.emit('room:created', {
               type: 'room:created',
-              room,
+        room: roomDocumentToRoom(room),
               ownerId: owner.id,
-            });
+      });
+    } catch (error) {
+      socket.emit('room:error', {
+        type: 'room:error',
+        message: error instanceof Error ? error.message : 'Error al crear la sala',
+      });
+    }
+  });
 
-            console.log('🏠  Sala creada:');
-            console.log('🆔  ID:', room.id);
-            console.log('📛  Nombre:', room.name);
-            console.log('👤  Propietario:', owner.name);
-            console.log('🗃️  Cartas:', cards.join(', '));
-            break;
-          }
+  // UNIRSE A SALA
+  socket.on('room:join', async (data: RoomJoinMessage) => {
+    try {
+      const { roomId, userName, emoji } = data;
 
-          case 'room:join': {
-            const { roomId, userName } = message as RoomJoinMessage;
+      const roomsCol = getRoomsCollection();
+      const room = await roomsCol.findOne({ _id: roomId });
 
-            const room = await roomsCol.findOne({ _id: roomId });
             if (!room) {
-              ws.send(JSON.stringify({
+        socket.emit('room:error', {
                 type: 'room:error',
-                message: 'Sala no encontrada'
-              }));
-              break;
+          message: 'Sala no encontrada',
+        });
+        return;
             }
 
             const user: User = {
               id: generateId(),
               name: userName,
+        emoji: emoji || DEFAULT_EMOJI,
               isReady: false,
               vote: null,
               spectator: false,
-            }
+      };
 
-            const updatedRoom = await roomsCol.findOneAndUpdate(
-              { _id: roomId },
-              {
-                $push: {
-                  users: user
-                }
-              },
-              {
-                returnDocument: 'after',
-              });
+      const updatedRoom = await roomsCol.findOneAndUpdate(
+        { _id: roomId },
+        { $push: { users: user } },
+        { returnDocument: 'after' }
+      );
 
             if (!updatedRoom) {
-              ws.send(JSON.stringify({
+        socket.emit('room:error', {
                 type: 'room:error',
-                message: 'Error al unirse a la sala'
-              }));
-              break;
-            }
+          message: 'Error al unirse a la sala',
+        });
+        return;
+      }
 
-            userSockets.set(user.id, ws);
             currentUserId = user.id;
             currentRoomId = updatedRoom._id.toString();
 
-            broadcastToUser<RoomJoinedMessage>(user.id, {
+      // Unirse al room de Socket.IO
+      socket.join(currentRoomId);
+
+      // Enviar confirmación al usuario
+      socket.emit('room:joined', {
               type: 'room:joined',
               room: roomDocumentToRoom(updatedRoom),
               userId: user.id,
             });
 
-            await broadcast<RoomUpdatedMessage>({
-              room: updatedRoom,
-              message: {
+      // Broadcast a todos en la sala
+      socket.to(currentRoomId).emit('room:updated', {
                 type: 'room:updated',
                 room: roomDocumentToRoom(updatedRoom),
-              }
-            })
+      });
+    } catch (error) {
+      socket.emit('room:error', {
+                type: 'room:error',
+        message: 'Error al unirse a la sala',
+      });
+    }
+  });
 
-            console.log(`👤  Usuario unido: ${user.name} a la sala ${roomId}`);
+  // VOTAR
+  socket.on('user:vote', async (data: UserVoteMessage) => {
+    try {
+      const { vote } = data;
 
-            break;
-          }
-
-          case 'room:reveal': {
             if (!currentRoomId || !currentUserId) {
-              ws.send(JSON.stringify({
+        socket.emit('room:error', {
                 type: 'room:error',
-                message: 'No estás en una sala'
-              }));
-              break;
-            }
+          message: 'No estás en una sala',
+        });
+        return;
+      }
 
-            const room = await roomsCol.findOne({_id: currentRoomId as unknown as ObjectId});
-            if (!room) {
-              ws.send(JSON.stringify({
-                type: 'room:error',
-                message: 'Sala no encontrada'
-              }));
-              break;
-            }
-
-            if (room.ownerId !== currentUserId) {
-              ws.send(JSON.stringify({
-                type: 'room:error',
-                message: 'Solo el propietario puede revelar los votos'
-              }));
-              break;
-            }
-
-            await roomsCol.updateOne(
-              {_id: currentRoomId as unknown as ObjectId},
-              {$set: {revealed: true}},
-            );
-
-            await broadcast<RoomUpdatedMessage>({
-              room,
-              message: {
-                type: 'room:updated',
-                room: roomDocumentToRoom({
-                  ...room,
-                  revealed: true,
-                }),
-              }
-            });
-
-            console.log(`👁️  Votos revelados en sala ${currentRoomId}`);
-            break;
-          }
-
-          case 'user:vote': {
-            const { vote } = message as UserVoteMessage;
-            if (!currentRoomId || !currentUserId) {
-              ws.send(JSON.stringify({
-                type: 'room:error',
-                message: 'No estás en una sala'
-              }));
-              break;
-            }
-
-            const updatedRoom = await roomsCol.findOneAndUpdate(
-              {
-                _id: currentRoomId as unknown as ObjectId,
-                'users.id': currentUserId
-              },
+      const roomsCol = getRoomsCollection();
+      const updatedRoom = await roomsCol.findOneAndUpdate(
+        {
+          _id: currentRoomId,
+          'users.id': currentUserId,
+        },
               { $set: { 'users.$.vote': vote, 'users.$.isReady': true } },
               { returnDocument: 'after' }
             );
 
             if (!updatedRoom) {
-              ws.send(JSON.stringify({
+        socket.emit('room:error', {
                 type: 'room:error',
-                message: 'Error al registrar el voto'
-              }));
-              break;
-            }
+          message: 'Error al registrar el voto',
+        });
+        return;
+      }
 
-            await broadcast<RoomUpdatedMessage>({
-              room: updatedRoom,
-              message: {
+      // Broadcast a toda la sala (incluyendo el votante)
+      io.to(currentRoomId).emit('room:updated', {
                 type: 'room:updated',
                 room: roomDocumentToRoom(updatedRoom),
-              }
-            })
+      });
+    } catch (error) {
+      socket.emit('room:error', {
+        type: 'room:error',
+        message: 'Error al registrar el voto',
+      });
+    }
+  });
 
-            console.log(`🗳️  Usuario ${currentUserId} votó ${vote} en sala ${currentRoomId}`);
-            break;
-          }
+  // REVELAR VOTOS
+  socket.on('room:reveal', async () => {
+    try {
+      if (!currentRoomId || !currentUserId) {
+        socket.emit('room:error', {
+          type: 'room:error',
+          message: 'No estás en una sala',
+        });
+        return;
+      }
 
-          case 'user:spectate': {
-            const { spectator } = message;
-            if (!currentRoomId || !currentUserId) {
-              ws.send(JSON.stringify({
+      const roomsCol = getRoomsCollection();
+      const room = await roomsCol.findOne({ _id: currentRoomId });
+
+      if (!room) {
+        socket.emit('room:error', {
+          type: 'room:error',
+          message: 'Sala no encontrada',
+        });
+        return;
+      }
+
+      if (room.ownerId !== currentUserId) {
+        socket.emit('room:error', {
                 type: 'room:error',
-                message: 'No estás en una sala'
-              }));
-              break;
+          message: 'Solo el moderador puede revelar los votos',
+        });
+        return;
             }
 
-            const updatedRoom = await roomsCol.findOneAndUpdate(
-              {
-                _id: currentRoomId as unknown as ObjectId,
-                'users.id': currentUserId
-              },
-              { $set: {
-                'users.$.spectator': spectator,
-                'users.$.isReady': spectator ? false : undefined,
-                'users.$.vote': spectator ? null : undefined,
-              } },
+      const updatedRoom = await roomsCol.findOneAndUpdate(
+        { _id: currentRoomId },
+        { $set: { revealed: true } },
               { returnDocument: 'after' }
             );
 
             if (!updatedRoom) {
-              ws.send(JSON.stringify({
+        socket.emit('room:error', {
                 type: 'room:error',
-                message: 'Error al actualizar el estado de espectador'
-              }));
-              break;
-            }
+          message: 'Error al revelar votos',
+        });
+        return;
+      }
 
-            await broadcast<RoomUpdatedMessage>({
-              room: updatedRoom,
-              message: {
+      // Broadcast a toda la sala
+      io.to(currentRoomId).emit('room:updated', {
                 type: 'room:updated',
                 room: roomDocumentToRoom(updatedRoom),
-              }
-            })
-
-            console.log(`👀  Usuario ${currentUserId} cambió estado de espectador a ${spectator} en sala ${currentRoomId}`);
-            break;
-          }
-
-          case 'room:reset': {
-            if (!currentRoomId || !currentUserId) {
-              ws.send(JSON.stringify({
-                type: 'room:error',
-                message: 'No estás en una sala'
-              }));
-              break;
-            }
-
-            const room = await roomsCol.findOne({
-              _id: currentRoomId as unknown as ObjectId
-            }, {
-              projection: {
-                ownerId: true
-              }
-            });
-
-            console.log('room', room);
-            if (!room) {
-              ws.send(JSON.stringify({
-                type: 'room:error',
-                message: 'Sala no encontrada'
-              }));
-              break;
-            }
-
-            if (room.ownerId !== currentUserId) {
-              ws.send(JSON.stringify({
-                type: 'room:error',
-                message: 'Solo el propietario puede reiniciar la votación'
-              }));
-              break;
-            }
-
-            const updated = await roomsCol.findOneAndUpdate(
-              { _id: currentRoomId as unknown as ObjectId },
-              { $set: { 'users.$[].vote': null, 'users.$[].isReady': false, revealed: false }},
-              { returnDocument: 'after' }
-            );
-
-            if (!updated) {
-              ws.send(JSON.stringify({
-                type: 'room:error',
-                message: 'Error al reiniciar la votación'
-              }));
-              break;
-            }
-
-            await broadcast<RoomUpdatedMessage>({
-              room: updated,
-              message: {
-                type: 'room:updated',
-                room: roomDocumentToRoom(updated),
-              }
-            });
-
-            console.log(`🔄  Votación reiniciada en sala ${currentRoomId}`);
-
-            break;
-          }
-
-          default:
-            console.warn('⚠️  Tipo de mensaje desconocido:', (message as { type: string }).type);
-            ws.send(JSON.stringify({
-              type: 'error',
-              message: 'Tipo de mensaje desconocido',
-            }));
-            break;
-        }
-      } catch (error) {
-        console.error('❌  Error procesando mensaje:', error);
-
-        ws.send(JSON.stringify({
-          type: 'error',
-          message: 'Error procesando el mensaje',
-        }));
-      }
-    });
-
-    ws.on('close', () => {
-      console.log('❌  Conexión WebSocket cerrada');
-      if (currentUserId) {
-        cleanupUser({ uid: currentUserId }).catch((err) => console.error('cleanupUser error', err));
-      }
-    });
-
-    ws.on('error', (error: Error) => {
-      console.error('❌  Error WebSocket:', error);
-    });
-  });
-
-  app.get('/health', async (req: Request, res: Response) => {
-    try {
-      const rooms = await roomsCol.countDocuments();
-
-      res.json({
-        status: 'ok',
-        rooms,
-        connections: userSockets.size,
-        timestamp: new Date().toISOString(),
       });
-    } catch (e) {
-      res.status(500).json({status: 'error', message: 'No se pudo obtener health'});
+    } catch (error) {
+      socket.emit('room:error', {
+        type: 'room:error',
+        message: 'Error al revelar votos',
+      });
     }
   });
 
-  process.on('uncaughtException', (error: Error) => {
-    console.error('❌  Error no capturado:', error);
-  });
-  process.on('unhandledRejection', (reason: string) => {
-    console.error('❌  Promise rechazada no manejada:', reason);
+  // REINICIAR VOTACIÓN
+  socket.on('room:reset', async () => {
+    try {
+            if (!currentRoomId || !currentUserId) {
+        socket.emit('room:error', {
+                type: 'room:error',
+          message: 'No estás en una sala',
+        });
+        return;
+      }
+
+      const roomsCol = getRoomsCollection();
+      const room = await roomsCol.findOne({ _id: currentRoomId });
+
+            if (!room) {
+        socket.emit('room:error', {
+                type: 'room:error',
+          message: 'Sala no encontrada',
+        });
+        return;
+            }
+
+            if (room.ownerId !== currentUserId) {
+        socket.emit('room:error', {
+                type: 'room:error',
+          message: 'Solo el moderador puede reiniciar la votación',
+        });
+        return;
+      }
+
+      const resetUsers = room.users.map((user) => ({
+        ...user,
+        vote: null,
+        isReady: false,
+      }));
+
+      const updatedRoom = await roomsCol.findOneAndUpdate(
+        { _id: currentRoomId },
+        { $set: { revealed: false, users: resetUsers } },
+              { returnDocument: 'after' }
+            );
+
+      if (!updatedRoom) {
+        socket.emit('room:error', {
+                type: 'room:error',
+          message: 'Error al reiniciar votación',
+        });
+        return;
+      }
+
+      // Broadcast a toda la sala
+      io.to(currentRoomId).emit('room:updated', {
+                type: 'room:updated',
+        room: roomDocumentToRoom(updatedRoom),
+      });
+    } catch (error) {
+      socket.emit('room:error', {
+        type: 'room:error',
+        message: 'Error al reiniciar votación',
+      });
+    }
   });
 
-  console.log('✨  Servidor de Planning Poker iniciado con MongoDB');
+  // DESCONEXIÓN
+  socket.on('disconnect', async () => {
+    if (!currentUserId || !currentRoomId) return;
+
+    try {
+      const roomsCol = getRoomsCollection();
+      const room = await roomsCol.findOne({ _id: currentRoomId });
+
+      if (!room) return;
+
+      const updatedUsers = room.users.filter((u) => u.id !== currentUserId);
+
+      if (updatedUsers.length === 0) {
+        await roomsCol.deleteOne({ _id: currentRoomId });
+        return;
+      }
+
+      let newOwnerId = room.ownerId;
+      if (room.ownerId === currentUserId && updatedUsers.length > 0) {
+        newOwnerId = updatedUsers[0].id;
+      }
+
+      const updatedRoom = await roomsCol.findOneAndUpdate(
+        { _id: currentRoomId },
+        { $set: { users: updatedUsers, ownerId: newOwnerId } },
+        { returnDocument: 'after' }
+      );
+
+      if (updatedRoom) {
+        io.to(currentRoomId).emit('room:updated', {
+          type: 'room:updated',
+          room: roomDocumentToRoom(updatedRoom),
+        });
+      }
+    } catch (error) {
+      // Silent cleanup
+    }
+  });
+});
+
+// REST API
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: Date.now() });
+});
+
+app.get('/rooms', async (req, res) => {
+  try {
+    const roomsCol = getRoomsCollection();
+    const rooms = await roomsCol.find({}).toArray();
+    const roomsData = rooms.map((r) => roomDocumentToRoom(r));
+    res.json({ rooms: roomsData });
+  } catch (error) {
+    res.status(500).json({ error: 'Error fetching rooms' });
+  }
+});
+
+// Iniciar servidor
+async function startServer() {
+  try {
+    await connectToDb();
+    httpServer.listen(PORT);
+  } catch (error) {
+    process.exit(1);
+  }
 }
 
-start().catch((err) => {
-  console.error('No se pudo iniciar el servidor:', err);
-  process.exit(1);
-});
+startServer();
