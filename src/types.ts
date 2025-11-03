@@ -1,10 +1,10 @@
 import { WebSocket } from 'ws';
-import {ObjectId, WithId} from "mongodb";
 
 // Base types
 export type User = {
   id: string;
   name: string;
+  emoji: string;
   isReady: boolean;
   vote: string | null;
   spectator: boolean;
@@ -23,7 +23,9 @@ export type Room = RoomBase & {
   id: string;
 }
 
-export type RoomDocument = WithId<RoomBase>;
+export type RoomDocument = RoomBase & {
+  _id: string;
+};
 
 export type WebSocketMessage = {
   type: string;
@@ -35,13 +37,15 @@ export type RoomCreateMessage = WebSocketMessage & {
   type: 'room:create';
   roomName: string;
   ownerName: string;
+  ownerEmoji: string;
   cards: string[];
 }
 
 export type RoomJoinMessage = WebSocketMessage & {
   type: 'room:join';
-  roomId: ObjectId;
+  roomId: string;
   userName: string;
+  emoji: string;
 }
 
 export type RoomRevealMessage = WebSocketMessage & {
