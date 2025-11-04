@@ -486,6 +486,23 @@ app.get('/rooms', async (req, res) => {
   }
 });
 
+app.get('/rooms/:roomId', async (req, res) => {
+  try {
+    const { roomId } = req.params;
+    const roomsCol = getRoomsCollection();
+    const room = await roomsCol.findOne({ _id: roomId });
+
+    if (!room) {
+      res.status(404).json({ error: 'Room not found' });
+      return;
+    }
+
+    res.json({ room: roomDocumentToRoom(room) });
+  } catch (error) {
+    res.status(500).json({ error: 'Error fetching room' });
+  }
+});
+
 // Iniciar servidor
 async function startServer() {
   try {
