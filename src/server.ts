@@ -183,27 +183,47 @@ io.on('connection', (socket: Socket) => {
     try {
       const { vote } = data;
 
-            if (!currentRoomId || !currentUserId) {
+      if (!currentRoomId || !currentUserId) {
         socket.emit('room:error', {
-                type: 'room:error',
+          type: 'room:error',
           message: 'No estás en una sala',
         });
         return;
       }
 
       const roomsCol = getRoomsCollection();
+      const room = await roomsCol.findOne({ _id: currentRoomId });
+
+      if (!room) {
+        socket.emit('room:error', {
+          type: 'room:error',
+          message: 'Sala no encontrada',
+        });
+        return;
+      }
+
+      // Verificar si el usuario es espectador
+      const user = room.users.find((u) => u.id === currentUserId);
+      if (user?.spectator) {
+        socket.emit('room:error', {
+          type: 'room:error',
+          message: 'Los espectadores no pueden votar',
+        });
+        return;
+      }
+
       const updatedRoom = await roomsCol.findOneAndUpdate(
         {
           _id: currentRoomId,
           'users.id': currentUserId,
         },
-              { $set: { 'users.$.vote': vote, 'users.$.isReady': true } },
-              { returnDocument: 'after' }
-            );
+        { $set: { 'users.$.vote': vote, 'users.$.isReady': true } },
+        { returnDocument: 'after' }
+      );
 
-            if (!updatedRoom) {
+      if (!updatedRoom) {
         socket.emit('room:error', {
-                type: 'room:error',
+          type: 'room:error',
           message: 'Error al registrar el voto',
         });
         return;
@@ -211,13 +231,81 @@ io.on('connection', (socket: Socket) => {
 
       // Broadcast a toda la sala (incluyendo el votante)
       io.to(currentRoomId).emit('room:updated', {
-                type: 'room:updated',
-                room: roomDocumentToRoom(updatedRoom),
+        type: 'room:updated',
+        room: roomDocumentToRoom(updatedRoom),
       });
     } catch (error) {
       socket.emit('room:error', {
         type: 'room:error',
         message: 'Error al registrar el voto',
+      });
+    }
+  });
+
+  // CAMBIAR MODO ESPECTADOR
+  socket.on('user:spectate', async (data: { spectator: boolean }) => {
+    try {
+      const { spectator } = data;
+
+      if (!currentRoomId || !currentUserId) {
+        socket.emit('room:error', {
+          type: 'room:error',
+          message: 'No estás en una sala',
+        });
+        return;
+      }
+
+      const roomsCol = getRoomsCollection();
+      const room = await roomsCol.findOne({ _id: currentRoomId });
+
+      if (!room) {
+        socket.emit('room:error', {
+          type: 'room:error',
+          message: 'Sala no encontrada',
+        });
+        return;
+      }
+
+      // Verificar que el usuario NO sea el owner
+      if (room.ownerId === currentUserId) {
+        socket.emit('room:error', {
+          type: 'room:error',
+          message: 'El creador de la sala no puede ser espectador',
+        });
+        return;
+      }
+
+      // Si se activa modo espectador, limpiar el voto
+      const updateData = spectator
+        ? { 'users.$.spectator': spectator, 'users.$.vote': null, 'users.$.isReady': false }
+        : { 'users.$.spectator': spectator };
+
+      const updatedRoom = await roomsCol.findOneAndUpdate(
+        {
+          _id: currentRoomId,
+          'users.id': currentUserId,
+        },
+        { $set: updateData },
+        { returnDocument: 'after' }
+      );
+
+      if (!updatedRoom) {
+        socket.emit('room:error', {
+          type: 'room:error',
+          message: 'Error al cambiar modo espectador',
+        });
+        return;
+      }
+
+      // Broadcast a toda la sala
+      io.to(currentRoomId).emit('room:updated', {
+        type: 'room:updated',
+        room: roomDocumentToRoom(updatedRoom),
+      });
+    } catch (error) {
+      socket.emit('room:error', {
+        type: 'room:error',
+        message: 'Error al cambiar modo espectador',
       });
     }
   });
