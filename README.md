@@ -42,6 +42,19 @@ pnpm start
 npm start
 ```
 
+### Probar en local igual que en producción (antes de subir)
+Para reproducir exactamente lo que ejecuta el contenedor en Railway/Docker:
+
+1. Crea o revisa tu `.env` con **MONGO_URL**, **DB_NAME** y opcionalmente **PORT** (igual que en tu plataforma).
+2. Ejecuta el mismo comando que en producción:
+```bash
+npm run build
+npm start
+# o en un solo paso (npm)
+npm run start:local
+```
+Si falla, en la consola verás el error real (ej. `MONGO_URL no está definido`, `port out of range`, error de conexión a MongoDB). Así puedes corregir variables o conexión antes de hacer deploy.
+
 ### Verificar tipos sin compilar
 ```bash
 pnpm typecheck
@@ -186,6 +199,11 @@ MONGO_URL=mongodb://localhost:27017
 DB_NAME=planning-poker
 PORT=3001
 ```
+
+**Si el contenedor falla con exit code 1** suele ser por:
+- **MONGO_URL** o **DB_NAME** no definidos en la plataforma (Railway, Render, etc.). Configura esas variables en el panel de tu servicio.
+- **PORT**: en muchas plataformas (Railway, Render) se inyecta automáticamente; no hace falta definirlo. Si lo defines, debe ser un número válido (ej. `3001`), no texto.
+- **MongoDB**: la URL debe ser accesible desde donde corre el contenedor (no uses `localhost` en producción; usa MongoDB Atlas o el host que te dé la plataforma).
 
 ## 🛠️ Stack Tecnológico
 
