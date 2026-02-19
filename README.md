@@ -4,7 +4,7 @@ Backend con WebSocket real para la aplicación de Planning Poker, ahora con pers
 
 ## 🚀 Instalación
 
-Usa tu gestor preferido (pnpm recomendado porque hay pnpm-lock.yaml):
+Usa tu gestor preferido (pnpm recomendado porque hay pnpm-lock.yaml) : 
 
 ```bash
 # con pnpm
